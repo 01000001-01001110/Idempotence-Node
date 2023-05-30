@@ -1,0 +1,122 @@
+#!/bin/bash
+
+#Setup Restart No-Prompt Code
+echo "Setting needrestart.conf to not prompt kernel popups..."
+if ! grep -q "\$nrconf{restart} = 'a'" /etc/needrestart/needrestart.conf; then
+    sed -i 's/#\$nrconf{restart} = '\''i'\''/\$nrconf{restart} = '\''a'\''/' /etc/needrestart/needrestart.conf
+fi
+if ! grep -q "\$nrconf{kernelhints} = -1;" /etc/needrestart/needrestart.conf; then
+    sed -i 's/#\$nrconf{kernelhints} = -1;/\$nrconf{kernelhints} = -1;/g' /etc/needrestart/needrestart.conf
+fi
+
+# Update package list and upgrade all packages
+apt-get update
+apt-get upgrade -y
+
+# Install curl and gnupg if they are not installed yet
+apt-get install -y wget curl gnupg2 software-properties-common apt-transport-https ca-certificates lsb-release jq
+
+# Restart services that complain after installing applications
+systemctl restart networkd-dispatcher.service
+systemctl restart systemd-logind.service
+systemctl restart unattended-upgrades.service
+
+# Helper function to check the version and install/upgrade if needed
+check_and_install_tool () {
+  local tool=$1
+  local desired_version=$2
+  local install_command
+  local uninstall_command
+  local version_command
+
+  # Install, uninstallation and version checking commands
+  case $tool in
+    "node")
+      install_command="curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash - && sudo apt-get install -y nodejs"
+      uninstall_command="sudo apt-get remove -y $tool"
+      version_command="$tool -v | tr -d 'v'"
+      ;;
+    "npm")
+      install_command="npm install -g npm@$desired_version"
+      uninstall_command="sudo apt-get remove -y $tool"
+      version_command="$tool -v"
+      ;;
+    "pm2")
+      install_command="npm install -g pm2@$desired_version"
+      uninstall_command="npm uninstall -g pm2"
+      version_command="$tool -v"
+      ;;
+    "ng")
+      install_command="npm install -g @angular/cli@$desired_version"
+      uninstall_command="npm uninstall -g @angular/cli"
+      version_command="$tool --version | head -n 1 | cut -d ' ' -f 3"
+      ;;
+    "mongo")
+      install_command="wget -nc https://www.mongodb.org/static/pgp/server-6.0.asc && cat server-6.0.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/mongodb.gpg >/dev/null && sudo sh -c 'echo \"deb [ arch=amd64,arm64 signed-by=/etc/apt/keyrings/mongodb.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse\" >> /etc/apt/sources.list.d/mongo.list' && sudo apt-get update && sudo apt-get install -y mongodb-org"
+      uninstall_command="sudo service mongod stop && sudo apt-get purge -y mongodb-org* && sudo rm -r /var/log/mongodb && sudo rm -r /var/lib/mongodb"
+      version_command="$tool --version | head -n 1 | awk '{ print $4 }' | cut -d'v' -f 2"
+      ;;
+    *)
+      echo "Invalid tool: $tool"
+      exit 1
+      ;;
+  esac
+
+  # Check if the tool is installed
+  if ! command -v $tool &> /dev/null
+  then
+    echo "$tool is not installed, installing..."
+    eval $install_command
+  else
+    echo "$tool is installed, checking the version..."
+    local installed_version=$(eval $version_command)
+
+    # If the installed version is older than the desired version
+    if [ "$(printf '%s\n' "$desired_version" "$installed_version" | sort -V | head -n1)" = "$installed_version" ]; then
+      if [ "$desired_version" != "$installed_version" ]; then
+        echo "Old version of $tool detected ($installed_version), installing the desired version ($desired_version)..."
+        eval $uninstall_command
+        eval $install_command
+      else
+        echo "$tool is already installed with the desired version ($desired_version)"
+      fi
+    else
+      echo "Warning: The installed version of $tool ($installed_version) is higher than the version specified in the script ($desired_version)"
+    fi
+  fi
+}
+
+# Check if Node.js, npm, PM2, Angular CLI, and MongoDB are installed with the correct versions
+check_and_install_tool "node" "16.0.0"
+check_and_install_tool "npm" "9.6.7"
+check_and_install_tool "pm2" "5.1.0"
+check_and_install_tool "ng" "13.0.0"
+check_and_install_tool "mongo" "6.0.0"
+
+# Function to check if the user exists and create/update it
+check_and_update_user () {
+  local user=$1
+  local password=$2
+
+  # Check if the user exists
+  if id "$user" &>/dev/null; then
+    echo "User $user exists, updating password..."
+    echo "$user:$password" | chpasswd
+  else
+    echo "User $user does not exist, creating..."
+
+    if [ "$user" = "root" ]; then
+      # Setting root password
+      echo "root:$password" | chpasswd
+    else
+      # Adding a normal user
+      useradd -m "$user"
+      echo "$user:$password" | chpasswd
+      usermod -aG sudo "$user"
+    fi
+  fi
+}
+
+# Check and update the root user and a normal user
+check_and_update_user "root" "<password>"
+check_and_update_user "<user>" "<password>"
